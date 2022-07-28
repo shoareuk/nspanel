@@ -1,0 +1,728 @@
+#===============================================================================
+# GENERAL CONFIG
+#===============================================================================
+
+substitutions:
+  # Name the device and it's entities
+  device_name: osh-iot-pnl-family-room
+  wifi_ssid: !secret wifi_ssid
+  wifi_pass: !secret wifi_password
+  tft_url: !secret tft_upload_url
+  
+# Functionality for the Nextion display
+external_components:
+  - source: github://pr#2956
+    components: [nextion]
+    refresh: 1h
+
+# Example config.yaml
+esphome:
+  name: "osh-iot-pnl-family-room"
+  comment: $device_name
+
+esp32:
+  board: esp32dev
+
+# Wifi settings
+wifi:
+  ssid: $wifi_ssid
+  password: $wifi_pass
+
+# OTA (Over the air updates) password. Add to your secrets.yaml
+ota:
+
+# Uart for the Nextion display
+uart:
+  tx_pin: 16
+  rx_pin: 17
+  baud_rate: 115200
+  id: tf_uart
+
+# Logger. Disable the temperature sensor etc. to focus on the HMI development
+logger:
+  baud_rate: 115200
+  #0
+  level: DEBUG
+  logs:
+    sensor: WARN
+    resistance: WARN
+    text_sensor: WARN
+    ntc: WARN
+
+#===============================================================================
+# APIs
+#===============================================================================
+
+# API. Add api_pwd to your secrets.yaml.
+api:
+
+  services:
+
+    - service: play_rtttl
+      variables:
+        song_str: string
+      then:
+        - rtttl.play:
+            rtttl: !lambda 'return song_str;'
+            
+    - service: send_command
+      variables:
+        cmd: string
+      then:
+        - lambda: 'id(disp1).send_command_printf("%s", cmd.c_str());'
+
+    # Service to update the HMI file - this will be used to update and change our tft
+    - service: upload_tft
+      then:
+        - lambda: 'id(disp1)->upload_tft();'
+    
+# A reboot button is always useful
+button:
+  - platform: restart
+    name: $device_name Restart
+
+#===============================================================================
+# TIME
+#===============================================================================
+
+# Time component that fetches time from Home Assistant and updates the display once a minute and when the display is ready at bootup (and time is available).
+time:
+  - platform: homeassistant
+    id: homeassistant_time
+    on_time:
+      - seconds: 0
+        minutes: /1
+        then:
+          - lambda: 'id(disp1).set_component_text_printf("home.lblTime", "%02i:%02i", id(homeassistant_time).now().hour, id(homeassistant_time).now().minute);'
+          - lambda: 'id(disp1).set_component_text_printf("home.lblDate", "%02i/%02i/%i", id(homeassistant_time).now().day_of_month, id(homeassistant_time).now().month, id(homeassistant_time).now().year);'
+    on_time_sync:
+        then:
+          - wait_until:
+              switch.is_on: nextion_init
+          - lambda: id(disp1).set_component_text_printf("home.lblTime", "%02i:%02i", id(homeassistant_time).now().hour, id(homeassistant_time).now().minute);
+          - lambda: 'id(disp1).set_component_text_printf("home.lblDate", "%02i/%02i/%i", id(homeassistant_time).now().day_of_month, id(homeassistant_time).now().month, id(homeassistant_time).now().year);'
+
+#===============================================================================
+# GLOBAL VARIABLES
+#===============================================================================
+
+globals:
+
+  - id: stateButtonId
+    type: std::string
+    restore_value: no
+    initial_value: '""'
+    
+  - id: buttonId
+    type: std::string
+    restore_value: no
+    initial_value: '""'
+    
+  - id: disabledIconId
+    type: int
+    
+  - id: enabledIconId
+    type: int
+    
+  - id: lightsOn
+    type: int
+    
+  - id: relayOn
+    type: int
+
+
+#===============================================================================
+# BINARY SENSORS
+#===============================================================================
+binary_sensor:
+
+#===============================================================================
+# PHYSICAL BUTTONS
+#===============================================================================
+
+  # Left button below the display
+  - platform: gpio
+    name: $device_name Left Button
+    pin:
+      number: 14
+      inverted: true
+    on_click:
+      - switch.toggle: relay_1
+      
+  - platform: homeassistant
+    id: left_relay_on
+    entity_id: switch.osh_iot_pnl_family_room_relay_1
+    on_state:
+      then:
+        - script.wait: relayToggleRoutine
+        - lambda: |-
+            
+            id(stateButtonId) = "";
+            id(buttonId) = "btnRelayLeft";
+            id(disabledIconId) = 36;
+            id(enabledIconId) = 37;
+            id(relayOn) = id(left_relay_on).state ? 1 : 0;
+        - script.execute: relayToggleRoutine
+
+  # Right button below the display
+  - platform: gpio
+    name: $device_name Right Button
+    pin:
+      number: 27
+      inverted: true
+    on_click:
+      - switch.toggle: relay_2
+      
+  - platform: homeassistant
+    id: right_relay_on
+    entity_id: switch.osh_iot_pnl_family_room_relay_2
+    on_state:
+      then:
+        - script.wait: relayToggleRoutine
+        - lambda: |-
+            
+            id(stateButtonId) = "";
+            id(buttonId) = "btnRelayRight";
+            id(disabledIconId) = 38;
+            id(enabledIconId) = 39;
+            id(relayOn) = id(right_relay_on).state ? 1 : 0;
+        - script.execute: relayToggleRoutine
+
+#===============================================================================
+# HOME PAGE
+#===============================================================================
+
+# ALL LIGHTS BUTTON
+
+  # Screen Click
+  - platform: nextion
+    name: $device_name Home - All Lights
+    page_id: 0
+    component_id: 1
+    on_press:
+      then:
+        - homeassistant.service:
+            service: light.turn_off
+            data:
+              entity_id: light.all_lights
+        - script.execute: lightsOffSound
+
+  # Link back to Home Assistant to update state
+  - platform: homeassistant
+    id: lights_on
+    entity_id: light.all_lights
+    on_state:
+      then:
+        - script.wait: lightsToggleRoutine
+        - lambda: |-
+        
+            id(stateButtonId) = "home.btnLightState";
+            id(buttonId) = "home.btnLights";
+            id(disabledIconId) = 40;
+            id(enabledIconId) = 41;
+            id(lightsOn) = id(lights_on).state ? 1 : 0;
+        - script.execute: lightsToggleRoutine
+
+  # SENSORS BUTTON
+
+  # Screen Click
+  - platform: nextion
+    name: $device_name Home - Sensors Enabled
+    page_id: 0
+    component_id: 2
+    on_release:
+      then:
+        - homeassistant.service:
+            service: script.toggle_motion_sensors_enabled
+          
+  # Link back to Home Assistant to update state
+  - platform: homeassistant
+    id: sensors_enabled
+    entity_id: input_boolean.occupancy_sensors_enabled
+    on_state:
+      then:
+        - script.wait: lightsToggleRoutine
+        - lambda: |-
+        
+            id(stateButtonId) = "home.btnSensors";
+            id(buttonId) = "home.btnSensors";
+            id(disabledIconId) = 42;
+            id(enabledIconId) = 43;
+            id(lightsOn) = id(sensors_enabled).state ? 1 : 0;
+        - script.execute: lightsToggleRoutine
+
+#===============================================================================
+# ROOMS PAGE
+#===============================================================================
+
+# 1.FAMILY ROOM
+
+  # Screen Click
+  - platform: nextion
+    name: $device_name Rooms - Family Room Lights
+    page_id: 1
+    component_id: 1
+    on_release:
+      then:
+        - homeassistant.service:
+            service: light.turn_off
+            data:
+              entity_id: light.family_room_lights
+
+  # Link back to Home Assistant to update state
+  - platform: homeassistant
+    id: familyRoom_lights_on
+    entity_id: light.family_room_lights
+    on_state:
+      then:
+        - script.wait: lightsToggleRoutine
+        - lambda: |-
+        
+            id(stateButtonId) = "rooms.btnFamRmState";
+            id(buttonId) = "rooms.btnFamilyRm";
+            id(disabledIconId) = 48;
+            id(enabledIconId) = 49;
+            id(lightsOn) = id(familyRoom_lights_on).state ? 1 : 0;
+        - script.execute: lightsToggleRoutine
+            
+# 2.DINING ROOM
+
+  # Screen Click
+  - platform: nextion
+    name: $device_name Rooms - Dining Room Lights
+    page_id: 1
+    component_id: 2
+    on_release:
+      then:
+        - homeassistant.service:
+            service: light.turn_off
+            data:
+              entity_id: light.dining_room_lights
+
+  # Link back to Home Assistant to update state
+  - platform: homeassistant
+    id: diningRoom_lights_on
+    entity_id: light.dining_room_lights
+    on_state:
+      then:
+        - script.wait: lightsToggleRoutine
+        - lambda: |-
+        
+            id(stateButtonId) = "rooms.btnDiningState";
+            id(buttonId) = "rooms.btnDiningRm";
+            id(disabledIconId) = 46;
+            id(enabledIconId) = 47;
+            id(lightsOn) = id(diningRoom_lights_on).state ? 1 : 0;
+        - script.execute: lightsToggleRoutine           
+            
+# 3.KITCHEN
+
+  # Screen Click
+  - platform: nextion
+    name: $device_name Rooms - Kitchen Lights
+    page_id: 1
+    component_id: 3
+    on_release:
+      then:
+        - homeassistant.service:
+            service: light.turn_off
+            data:
+              entity_id: light.kitchen_lights
+
+  # Link back to Home Assistant to update state
+  - platform: homeassistant
+    id: kitchen_lights_on
+    entity_id: light.kitchen_lights
+    on_state:
+      then:
+        - script.wait: lightsToggleRoutine
+        - lambda: |-
+        
+            id(stateButtonId) = "rooms.btnKitchnState";
+            id(buttonId) = "rooms.btnKitchen";
+            id(disabledIconId) = 58;
+            id(enabledIconId) = 59;
+            id(lightsOn) = id(kitchen_lights_on).state ? 1 : 0;
+        - script.execute: lightsToggleRoutine            
+            
+# 4.HALL
+
+  # Screen Click
+  - platform: nextion
+    name: $device_name Rooms - Hall Lights
+    page_id: 1
+    component_id: 4
+    on_release:
+      then:
+        - homeassistant.service:
+            service: light.turn_off
+            data:
+              entity_id: light.hall_lights
+
+  # Link back to Home Assistant to update state
+  - platform: homeassistant
+    id: hall_lights_on
+    entity_id: light.hall_lights
+    on_state:
+      then:
+        - script.wait: lightsToggleRoutine
+        - lambda: |-
+        
+            id(stateButtonId) = "rooms.btnHallState";
+            id(buttonId) = "rooms.btnHall";
+            id(disabledIconId) = 56;
+            id(enabledIconId) = 57;
+            id(lightsOn) = id(hall_lights_on).state ? 1 : 0;
+        - script.execute: lightsToggleRoutine         
+            
+# 5.GARAGE
+
+  # Screen Click
+  - platform: nextion
+    name: $device_name Rooms - Garage Lights
+    page_id: 1
+    component_id: 5
+    on_release:
+      then:
+        - homeassistant.service:
+            service: light.turn_off
+            data:
+              entity_id: light.garage_lights
+
+  # Link back to Home Assistant to update state
+  - platform: homeassistant
+    id: garage_lights_on
+    entity_id: light.garage_lights
+    on_state:
+      then:
+        - script.wait: lightsToggleRoutine
+        - lambda: |-
+        
+            id(stateButtonId) = "rooms.btnGarageState";
+            id(buttonId) = "rooms.btnGarage";
+            id(disabledIconId) = 50;
+            id(enabledIconId) = 51;
+            id(lightsOn) = id(garage_lights_on).state ? 1 : 0;
+        - script.execute: lightsToggleRoutine           
+
+# 6.STUDIO
+
+  # Screen Click
+  - platform: nextion
+    name: $device_name Home - All Lights
+    page_id: 1
+    component_id: 6
+    on_release:
+      then:
+        - homeassistant.service:
+            service: light.turn_off
+            data:
+              entity_id: light.studio_lights
+
+  # Link back to Home Assistant to update state
+  - platform: homeassistant
+    id: studio_lights_on
+    entity_id: light.studio_lights
+    on_state:
+      then:
+        - script.wait: lightsToggleRoutine
+        - lambda: |-
+        
+            id(stateButtonId) = "rooms.btnStudioState";
+            id(buttonId) = "rooms.btnStudio";
+            id(disabledIconId) = 64;
+            id(enabledIconId) = 65;
+            id(lightsOn) = id(studio_lights_on).state ? 1 : 0;
+        - script.execute: lightsToggleRoutine
+
+# 7.GARDEN
+
+  # Screen Click
+  - platform: nextion
+    name: $device_name Rooms - Garden Lights
+    page_id: 1
+    component_id: 7
+    on_release:
+      then:
+        - homeassistant.service:
+            service: light.turn_off
+            data:
+              entity_id: light.garden_lights
+
+  # Link back to Home Assistant to update state
+  - platform: homeassistant
+    id: garden_lights_on
+    entity_id: light.garden_lights
+    on_state:
+      then:
+        - script.wait: lightsToggleRoutine
+        - lambda: |-
+        
+            id(stateButtonId) = "rooms.btnGardenState";
+            id(buttonId) = "rooms.btnGarden";
+            id(disabledIconId) = 52;
+            id(enabledIconId) = 53;
+            id(lightsOn) = id(garden_lights_on).state ? 1 : 0;
+        - script.execute: lightsToggleRoutine
+
+#===============================================================================
+# TIMER BUTTON SOUND HACK
+#===============================================================================
+
+  - platform: nextion
+    name: $device_name Home - All Lights
+    page_id: 101
+    component_id: 101
+    on_release:
+      - rtttl.play: "scale_up:d=32,o=5,b=100:c,c#,d#,e,f#,g#,a#,b"
+output:
+  # Buzzer for playing tones
+  - platform: ledc
+    id: buzzer_out
+    pin:
+      number: 21
+      
+switch:
+  # Physical relay 1
+  - platform: gpio
+    name: $device_name Relay 1
+    id: relay_1
+    pin:
+      number: 22
+
+  # Physical relay 2
+  - platform: gpio
+    name: $device_name Relay 2
+    id: relay_2
+    pin:
+      number: 19
+
+  # Turn screen power on/off. Easy way to configure the screen power control, but this should not be used from HA, as all components must be re-initialized afterwards. For lights, names of lights etc. this practically means that the state must change once to happen.
+  - platform: gpio
+    name: $device_name Screen Power
+    id: screen_power
+    entity_category: config
+    pin:
+      number: 4
+      inverted: true
+    restore_mode: ALWAYS_ON
+
+  # Basically a global variable to keep track on whether the Nextion display is ready or not. Delays initial info from HA to the display.
+  - platform: template
+    name: $device_name Nextion inited
+    id: nextion_init
+    entity_category: config
+    restore_state: false
+    assumed_state: off
+    optimistic: true
+
+#===============================================================================
+# HARDWARE / INTERNAL SENSORS
+#===============================================================================
+
+# Rtttl function for buzzer
+rtttl:
+  id: buzzer
+  output: buzzer_out
+
+sensor:
+  # Internal temperature sensor, adc value
+  - platform: adc
+    id: ntc_source
+    pin: 38
+    update_interval: 10s
+    attenuation: 11db
+
+  # Internal temperature sensor, adc reading converted to resistance (calculation) 
+  - platform: resistance
+    id: resistance_sensor
+    sensor: ntc_source
+    configuration: DOWNSTREAM
+    resistor: 11.2kOhm
+
+  # Internal temperature sensor, resistance to temperature (calculation)
+  - platform: ntc
+    id: temperature
+    sensor: resistance_sensor
+    calibration:
+      b_constant: 3950
+      reference_temperature: 25°C
+      reference_resistance: 10kOhm
+    name: $device_name Temperature
+
+  # Temperature outside, fetched from HA
+  - platform: homeassistant
+    id: current_temperature
+    entity_id: weather.old_school_house
+    attribute: temperature
+    on_value:
+      then:
+        - lambda: 'id(disp1).set_component_text_printf("home.lblTemp","%.1f",id(current_temperature).state);'
+        - lambda: 'id(disp1).send_command_printf("%s", "vis home.lblDegrees,1");'
+
+text_sensor:
+
+  # Sun sensor from HA. Used to decide whether a sun or moon weather symbol should be used.
+  - platform: homeassistant
+    id: sun_sun
+    entity_id: sun.sun
+    on_value:
+      then:
+        - script.wait: updateWeather
+        - script.execute: updateWeather
+
+  # Weather symbol, HA weather entity to pull data from
+  - platform: homeassistant
+    id: weather_symbol
+    entity_id: weather.old_school_house
+    on_value:
+      then:
+        - script.execute: updateWeather
+        - script.execute: updateWeather
+
+number:
+
+  # Screen brightness
+  - platform: template
+    name: $device_name Brightness
+    id: brightness
+    entity_category: config
+    unit_of_measurement: '%'
+    min_value: 0
+    max_value: 100
+    step: 1
+    initial_value: 30
+    set_action:
+      then:
+        - lambda: 'id(disp1).set_backlight_brightness(x/100);'
+
+# Configure the screen itself
+display:
+  - platform: nextion
+    id: disp1
+    uart_id: tf_uart
+    tft_url: $tft_url
+    on_setup:
+      then:
+        - wait_until:
+            api.connected
+        - switch.template.publish:
+            id: nextion_init
+            state: on
+    
+script:
+
+  - id: lightsToggleRoutine
+    then:
+      - lambda: |-
+      
+          int iconId = id(lightsOn)
+            ? id(enabledIconId)
+            : id(disabledIconId);
+            
+          id(disp1).send_command_printf("%s.pic=%i", id(buttonId).c_str(), iconId);
+          id(disp1).send_command_printf("%s.pic2=%i", id(buttonId).c_str(), iconId);
+          
+          if(strcmp(id(stateButtonId).c_str(), "") != 0){
+            id(disp1).send_command_printf("%s.val=%i", id(stateButtonId).c_str(),id(lightsOn));
+          }
+
+  - id: lightsOffSound
+    then:
+      - rtttl.play: "scale_up:d=32,o=5,b=100:c,c#,d#,e,f#,g#,a#,b"
+      
+  - id: relayToggleRoutine
+    then:
+      - lambda: |-
+          
+          int iconId = id(relayOn)
+            ? id(enabledIconId)
+            : id(disabledIconId);
+          
+          id(disp1).send_command_printf("home.%s.pic=%i", id(buttonId).c_str(), iconId);
+          id(disp1).send_command_printf("home.%s.pic2=%i", id(buttonId).c_str(), iconId);
+          
+          id(disp1).send_command_printf("rooms.%s.pic=%i", id(buttonId).c_str(), iconId);
+          id(disp1).send_command_printf("rooms.%s.pic2=%i", id(buttonId).c_str(), iconId);
+          
+          id(disp1).send_command_printf("family_room.%s.pic=%i", id(buttonId).c_str(), iconId);
+          id(disp1).send_command_printf("family_room.%s.pic2=%i", id(buttonId).c_str(), iconId);
+          
+          id(disp1).send_command_printf("dining_room.%s.pic=%i", id(buttonId).c_str(), iconId);
+          id(disp1).send_command_printf("dining_room.%s.pic2=%i", id(buttonId).c_str(), iconId);
+          
+          id(disp1).send_command_printf("kitchen.%s.pic=%i", id(buttonId).c_str(), iconId);
+          id(disp1).send_command_printf("kitchen.%s.pic2=%i", id(buttonId).c_str(), iconId);
+          
+          id(disp1).send_command_printf("hall.%s.pic=%i", id(buttonId).c_str(), iconId);
+          id(disp1).send_command_printf("hall.%s.pic2=%i", id(buttonId).c_str(), iconId);
+          
+          id(disp1).send_command_printf("garage.%s.pic=%i", id(buttonId).c_str(), iconId);
+          id(disp1).send_command_printf("garage.%s.pic2=%i", id(buttonId).c_str(), iconId);
+          
+          id(disp1).send_command_printf("studio.%s.pic=%i", id(buttonId).c_str(), iconId);
+          id(disp1).send_command_printf("studio.%s.pic=%i", id(buttonId).c_str(), iconId);
+          
+          id(disp1).send_command_printf("garden.%s.pic=%i", id(buttonId).c_str(), iconId);
+          id(disp1).send_command_printf("garden.%s.pic2=%i", id(buttonId).c_str(), iconId);
+          
+  - id: updateWeather
+    then:
+      - wait_until:
+            switch.is_on: nextion_init
+      - lambda: |-
+          int symbol=0;
+          
+          if(id(weather_symbol).state == "" || id(sun_sun).state == "") {
+            symbol = 0;
+          } else if (id(weather_symbol).state == "clear-night") {
+            symbol=1;
+          } else if (id(weather_symbol).state == "cloudy") {
+            symbol=2;
+            if (id(sun_sun).state == "below_horizon") {
+              symbol=3;
+            }
+          } else if (id(weather_symbol).state == "fog") {
+            symbol=4;
+          } else if (id(weather_symbol).state == "hail" || id(weather_symbol).state == "snowy-rainy") {
+            symbol=5;
+            if (id(sun_sun).state == "below_horizon") {
+              symbol=6;
+            }
+          } else if (id(weather_symbol).state == "lightning") {
+            symbol=7;
+            if (id(sun_sun).state == "below_horizon") {
+              symbol=8;
+            }
+          } else if (id(weather_symbol).state == "lightning-rainy" || id(weather_symbol).state == "exceptional") {
+            symbol=9;
+            if (id(sun_sun).state == "below_horizon") {
+              symbol=10;
+            }
+          } else if (id(weather_symbol).state == "partlycloudy") {
+            symbol=11;
+            if (id(sun_sun).state == "below_horizon") {
+              symbol=12;
+            }
+          } else if (id(weather_symbol).state == "pouring") {
+            symbol=13;
+            if (id(sun_sun).state == "below_horizon") {
+              symbol=14;
+            }
+          } else if (id(weather_symbol).state == "rainy") {
+            symbol=15;
+            if (id(sun_sun).state == "below_horizon") {
+              symbol=16;
+            }
+          } else if (id(weather_symbol).state == "snowy") {
+            symbol=17;
+            if (id(sun_sun).state == "below_horizon") {
+              symbol=18;
+            }
+          } else if (id(weather_symbol).state == "sunny") {
+            symbol=19;
+          } else if (id(weather_symbol).state == "windy" || id(weather_symbol).state == "windy-variant") {
+            symbol=20;              
+          }
+          
+          id(disp1).send_command_printf("home.picWeather.pic=%i", symbol);
